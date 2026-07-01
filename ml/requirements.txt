@@ -1,0 +1,9 @@
+# Offline ML tooling — NOT part of the web app bundle.
+# Dataset generator (generate_dataset.py):
+pillow>=10
+numpy>=1.24
+
+# Training + ONNX export (train.py). On Apple Silicon, torch uses MPS automatically.
+# train.py exports with dynamo=False (legacy exporter), which needs `onnx`.
+torch>=2.2
+onnx>=1.16
