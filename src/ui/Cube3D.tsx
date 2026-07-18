@@ -22,6 +22,7 @@ interface Props {
 }
 
 const DURATION = 320;
+const ROTATION_STEP = 6;
 
 export function Cube3D({ state, animateMove = null, highlightFace = null }: Props) {
   const [rot, setRot] = useState({ x: -28, y: -36 });
@@ -29,6 +30,8 @@ export function Cube3D({ state, animateMove = null, highlightFace = null }: Prop
 
   const [anim, setAnim] = useState<{ move: Move; from: FaceletState } | null>(null);
   const [turned, setTurned] = useState(false);
+  const firstFrameRef = useRef<number | null>(null);
+  const secondFrameRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useLayoutEffect(() => {
@@ -37,10 +40,23 @@ export function Cube3D({ state, animateMove = null, highlightFace = null }: Prop
     const from = applyMove(state, invertMove(animateMove.move));
     setAnim({ move: animateMove.move, from });
     setTurned(false);
-    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setTurned(true)));
+    firstFrameRef.current = requestAnimationFrame(() => {
+      firstFrameRef.current = null;
+      secondFrameRef.current = requestAnimationFrame(() => {
+        secondFrameRef.current = null;
+        setTurned(true);
+      });
+    });
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => setAnim(null), DURATION + 40);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      if (firstFrameRef.current !== null) cancelAnimationFrame(firstFrameRef.current);
+      if (secondFrameRef.current !== null) cancelAnimationFrame(secondFrameRef.current);
+      firstFrameRef.current = null;
+      secondFrameRef.current = null;
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    };
   }, [animateMove?.nonce]);
 
   const baseState = anim ? anim.from : state;
@@ -50,9 +66,38 @@ export function Cube3D({ state, animateMove = null, highlightFace = null }: Prop
   const staticCubies = CUBIES.filter((c) => !turningFace || !inLayer(turningFace, c));
   const layerCubies = turningFace ? CUBIES.filter((c) => inLayer(turningFace, c)) : [];
 
+  const rotateWithKey = (key: string): boolean => {
+    switch (key) {
+      case 'ArrowUp':
+        setRot((r) => ({ ...r, x: clamp(r.x + ROTATION_STEP, -89, 89) }));
+        return true;
+      case 'ArrowDown':
+        setRot((r) => ({ ...r, x: clamp(r.x - ROTATION_STEP, -89, 89) }));
+        return true;
+      case 'ArrowLeft':
+        setRot((r) => ({ ...r, y: r.y - ROTATION_STEP }));
+        return true;
+      case 'ArrowRight':
+        setRot((r) => ({ ...r, y: r.y + ROTATION_STEP }));
+        return true;
+      default:
+        return false;
+    }
+  };
+
   return (
     <div
       className="cube3d"
+      role="group"
+      tabIndex={0}
+      aria-label="3D Rubik's Cube. Use arrow keys to rotate."
+      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+      onKeyDown={(e) => {
+        if (rotateWithKey(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
       onPointerDown={(e) => {
         drag.current = { x: e.clientX, y: e.clientY };
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -66,7 +111,7 @@ export function Cube3D({ state, animateMove = null, highlightFace = null }: Prop
       }}
       onPointerUp={() => (drag.current = null)}
       onPointerCancel={() => (drag.current = null)}
-      title="Drag to rotate"
+      title="Drag or use arrow keys to rotate"
     >
       <div className="cube3d__scene">
         <div className="cube3d__cube" style={{ transform: `rotateX(${rot.x}deg) rotateY(${rot.y}deg)` }}>

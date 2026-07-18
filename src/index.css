@@ -311,6 +311,10 @@ body {
   padding: var(--space-6) 0 var(--space-3);
   touch-action: none;
 }
+.cube3d:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
 .cube3d__scene {
   width: 150px;
   height: 150px;

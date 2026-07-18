@@ -1,13 +1,13 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { COLOR_HEX, COLOR_NAMES, DEFAULT_SCHEME, FACE_BASE, type Color, type Face } from '../cube/types';
 import { recognizeFromSamples, type RGB } from '../vision/colorClassify';
 import { quadPoint, sampleQuadGrid, type Quad } from '../vision/imageSampler';
 import { detectFaceQuadML } from '../vision/detectModel';
 import { refineQuad } from '../vision/refineQuad';
 
-const ORT_VERSION = '1.20.1';
-const ORT_MODULE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.min.mjs`;
-const ORT_WASM_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
+const ORT_WASM_PATHS = `${import.meta.env.BASE_URL}ort/`;
+const loadOrt = () => import('onnxruntime-web');
+const loadHeicConverter = () => import('heic2any');
 
 const MODEL_VERSION = '4';
 const MODEL_URL = `${import.meta.env.BASE_URL}model.onnx?v=${MODEL_VERSION}`;
@@ -45,7 +45,7 @@ function cropSquare(img: ImageData, x0: number, y0: number, side: number): Squar
 async function runModel(reg: SquareReg, img: ImageData): Promise<Quad | null> {
   const ml = await detectFaceQuadML(reg.crop, {
     modelUrl: MODEL_URL,
-    ortModule: ORT_MODULE,
+    loadOrt,
     wasmPaths: ORT_WASM_PATHS,
   });
   if (!ml) return null;
@@ -76,8 +76,6 @@ async function detectQuadML(img: ImageData): Promise<Quad | null> {
   return refineQuad(img, quad);
 }
 
-const HEIC2ANY_MODULE = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/+esm';
-
 function isHeic(file: File): boolean {
   return /image\/(heic|heif)/i.test(file.type) || /\.(heic|heif)$/i.test(file.name);
 }
@@ -85,7 +83,7 @@ function isHeic(file: File): boolean {
 async function ensureLoadable(file: File): Promise<Blob> {
   if (!isHeic(file)) return file;
   try {
-    const mod: any = await import(/* @vite-ignore */ HEIC2ANY_MODULE);
+    const mod = await loadHeicConverter();
     const heic2any = mod.default ?? mod;
     const out = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 });
     return Array.isArray(out) ? out[0] : out;
@@ -120,6 +118,39 @@ interface FaceData {
   autoConfidence: number;
 }
 
+interface AutoDetectOptions {
+  face: Face;
+  imageData: ImageData;
+  detectQuad: (imageData: ImageData) => Promise<Quad | null>;
+  isMounted: () => boolean;
+  setQuad: (face: Face, quad: Quad) => void;
+  setError: (message: string) => void;
+  markDetecting: (face: Face, on: boolean) => void;
+}
+
+export async function runAutoDetectForFace({
+  face,
+  imageData,
+  detectQuad,
+  isMounted,
+  setQuad,
+  setError,
+  markDetecting,
+}: AutoDetectOptions): Promise<void> {
+  markDetecting(face, true);
+  try {
+    const quad = await detectQuad(imageData);
+    if (!isMounted()) return;
+    if (quad) setQuad(face, quad);
+    else setError('Auto-detect is unavailable right now — drag the box manually.');
+  } catch {
+    if (!isMounted()) return;
+    setError('Auto-detect failed — drag the box manually.');
+  } finally {
+    if (isMounted()) markDetecting(face, false);
+  }
+}
+
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const im = new Image();
@@ -129,31 +160,53 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
-async function fileToFaceData(file: File): Promise<FaceData> {
+interface ObjectUrlOwner {
+  acquire: (url: string) => boolean;
+  release: (url: string) => void;
+}
+
+async function fileToFaceData(file: File, objectUrls: ObjectUrlOwner): Promise<FaceData> {
   const loadable = await ensureLoadable(file);
   const url = URL.createObjectURL(loadable);
-  const img = await loadImage(url);
-  const maxDim = 420;
-  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-  const w = Math.max(1, Math.round(img.width * scale));
-  const h = Math.max(1, Math.round(img.height * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d')!;
-  ctx.drawImage(img, 0, 0, w, h);
-  const imageData = ctx.getImageData(0, 0, w, h);
-  return { url, imageData, w, h, quad: centeredQuad(w, h), autoConfidence: 0 };
+  if (!objectUrls.acquire(url)) throw new Error('Uploader unmounted');
+  try {
+    const img = await loadImage(url);
+    const maxDim = 420;
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    return { url, imageData, w, h, quad: centeredQuad(w, h), autoConfidence: 0 };
+  } catch (error) {
+    objectUrls.release(url);
+    throw error;
+  }
 }
 
 export function ImageUploader({ onRecognized }: Props) {
   const [faces, setFaces] = useState<Partial<Record<Face, FaceData>>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(false);
+  const objectUrlsRef = useRef(new Set<string>());
 
   const [pending, setPending] = useState<Set<Face>>(new Set());
 
   const [detecting, setDetecting] = useState<Set<Face>>(new Set());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      objectUrlsRef.current.clear();
+    };
+  }, []);
 
   const allUploaded = UPLOAD_ORDER.every((f) => faces[f]);
 
@@ -173,18 +226,31 @@ export function ImageUploader({ onRecognized }: Props) {
     setError(null);
     markPending(face, true);
     try {
-      const data = await fileToFaceData(file);
+      const data = await fileToFaceData(file, {
+        acquire: (url) => {
+          if (!mountedRef.current) {
+            URL.revokeObjectURL(url);
+            return false;
+          }
+          objectUrlsRef.current.add(url);
+          return true;
+        },
+        release: (url) => {
+          if (objectUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
+        },
+      });
+      if (!mountedRef.current) return;
       setFaces((prev) => {
         const old = prev[face];
-        if (old) URL.revokeObjectURL(old.url);
+        if (old && objectUrlsRef.current.delete(old.url)) URL.revokeObjectURL(old.url);
         return { ...prev, [face]: data };
       });
     } catch {
-      setError(
+      if (mountedRef.current) setError(
         "Couldn't read that photo. If you're on an iPhone, set Camera to “Most Compatible” (JPEG) or upload a JPEG/PNG."
       );
     } finally {
-      markPending(face, false);
+      if (mountedRef.current) markPending(face, false);
     }
   };
 
@@ -202,16 +268,15 @@ export function ImageUploader({ onRecognized }: Props) {
     const d = faces[face];
     if (!d) return;
     setError(null);
-    markDetecting(face, true);
-    try {
-      const quad = await detectQuadML(d.imageData);
-      if (quad) setQuad(face, quad);
-      else setError('Auto-detect is unavailable right now — drag the box manually.');
-    } catch {
-      setError('Auto-detect failed — drag the box manually.');
-    } finally {
-      markDetecting(face, false);
-    }
+    await runAutoDetectForFace({
+      face,
+      imageData: d.imageData,
+      detectQuad: detectQuadML,
+      isMounted: () => mountedRef.current,
+      setQuad,
+      setError,
+      markDetecting,
+    });
   };
 
   const exportTraining = () => {

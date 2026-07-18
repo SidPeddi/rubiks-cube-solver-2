@@ -10,10 +10,11 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
-    "typecheck": "tsc -b --noEmit",
-    "demo": "vite-node examples/solve-demo.ts"
+    "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
+    "heic2any": "^0.0.4",
+    "onnxruntime-web": "^1.20.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -28,6 +29,7 @@
     "jsdom": "^24.1.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.2",
+    "vite-plugin-static-copy": "^3.1.4",
     "vitest": "^2.0.5"
   }
 }

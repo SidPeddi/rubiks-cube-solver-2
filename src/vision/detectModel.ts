@@ -3,40 +3,52 @@ import type { ImageLike, Quad } from './imageSampler';
 
 export const INPUT_SIZE = 160;
 
+type OrtModule = typeof import('onnxruntime-web');
+type OrtLoader = () => Promise<OrtModule>;
+type OrtSession = Awaited<ReturnType<OrtModule['InferenceSession']['create']>>;
+type OrtTensor = InstanceType<OrtModule['Tensor']>;
+
 export interface MLDetectOptions {
-
   modelUrl: string;
-
-  ortModule?: string;
-
-  wasmPaths?: string;
+  loadOrt?: OrtLoader;
+  wasmPaths?: string | Record<string, string>;
 }
 
-function importOrt(specifier: string): Promise<any> {
-  return import(/* @vite-ignore */ specifier);
-}
+const loadLocalOrt: OrtLoader = () => import('onnxruntime-web');
 
-let ortPromise: Promise<any> | null = null;
-let sessionPromise: Promise<any> | null = null;
+const ortPromises = new WeakMap<OrtLoader, Promise<OrtModule>>();
+const sessionPromises = new WeakMap<OrtLoader, Map<string, Promise<OrtSession>>>();
 
-function getOrt(specifier: string, wasmPaths?: string): Promise<any> {
+function getOrt(loadOrt: OrtLoader, wasmPaths?: string | Record<string, string>): Promise<OrtModule> {
+  let ortPromise = ortPromises.get(loadOrt);
   if (!ortPromise) {
-    ortPromise = importOrt(specifier).then((ort) => {
-      try {
-
-        ort.env.wasm.numThreads = 1;
-        if (wasmPaths) ort.env.wasm.wasmPaths = wasmPaths;
-      } catch {
-      }
+    ortPromise = loadOrt().then((ort) => {
+      ort.env.wasm.numThreads = 1;
+      if (wasmPaths) ort.env.wasm.wasmPaths = wasmPaths;
       return ort;
     });
+    ortPromises.set(loadOrt, ortPromise);
+    void ortPromise.catch(() => ortPromises.delete(loadOrt));
   }
   return ortPromise;
 }
 
-function getSession(modelUrl: string, specifier: string, wasmPaths?: string): Promise<any> {
+function getSession(
+  modelUrl: string,
+  loadOrt: OrtLoader,
+  wasmPaths?: string | Record<string, string>,
+): Promise<OrtSession> {
+  let sessions = sessionPromises.get(loadOrt);
+  if (!sessions) {
+    sessions = new Map();
+    sessionPromises.set(loadOrt, sessions);
+  }
+
+  let sessionPromise = sessions.get(modelUrl);
   if (!sessionPromise) {
-    sessionPromise = getOrt(specifier, wasmPaths).then((ort) => ort.InferenceSession.create(modelUrl));
+    sessionPromise = getOrt(loadOrt, wasmPaths).then((ort) => ort.InferenceSession.create(modelUrl));
+    sessions.set(modelUrl, sessionPromise);
+    void sessionPromise.catch(() => sessions?.delete(modelUrl));
   }
   return sessionPromise;
 }
@@ -71,15 +83,15 @@ function preprocess(img: ImageLike, size: number): Float32Array {
 
 export async function detectFaceQuadML(img: ImageLike, opts: MLDetectOptions): Promise<Quad | null> {
   try {
-    const specifier = opts.ortModule ?? 'onnxruntime-web';
-    const ort = await getOrt(specifier, opts.wasmPaths);
-    const session = await getSession(opts.modelUrl, specifier, opts.wasmPaths);
+    const loadOrt = opts.loadOrt ?? loadLocalOrt;
+    const ort = await getOrt(loadOrt, opts.wasmPaths);
+    const session = await getSession(opts.modelUrl, loadOrt, opts.wasmPaths);
     const input = preprocess(img, INPUT_SIZE);
     const tensor = new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-    const feeds: Record<string, unknown> = { [session.inputNames[0]]: tensor };
+    const feeds: Record<string, OrtTensor> = { [session.inputNames[0]]: tensor };
     const output = await session.run(feeds);
-    const data: Float32Array = output[session.outputNames[0]].data;
-    if (!data || data.length < 8) return null;
+    const data = output[session.outputNames[0]].data;
+    if (!(data instanceof Float32Array) || data.length < 8) return null;
     const clamp = (v: number) => Math.max(0, Math.min(1, v));
     return [
       { x: clamp(data[0]), y: clamp(data[1]) },

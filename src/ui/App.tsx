@@ -25,6 +25,8 @@ export function App() {
   const [shared, setShared] = useState<'shared' | 'copied' | 'manual' | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const shareInputRef = useRef<HTMLInputElement | null>(null);
+  const shareTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
 
   const solving = result?.ok === true;
 
@@ -158,31 +160,45 @@ export function App() {
   };
 
   const flashShared = (kind: 'shared' | 'copied') => {
+    if (!mountedRef.current) return;
     setShared(kind);
     setShareUrl(null);
-    setTimeout(() => setShared(null), 2000);
+    if (shareTimeoutRef.current) clearTimeout(shareTimeoutRef.current);
+    shareTimeoutRef.current = setTimeout(() => setShared(null), 2000);
   };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (shareTimeoutRef.current) clearTimeout(shareTimeoutRef.current);
+    };
+  }, []);
 
   const handleShare = async () => {
     const url = buildShareUrl(cube);
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({ title: "Rubik's Cube solve", url });
+        if (!mountedRef.current) return;
         flashShared('shared');
         return;
       } catch (e) {
         if ((e as Error)?.name === 'AbortError') return;
       }
     }
+    if (!mountedRef.current) return;
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(url);
+        if (!mountedRef.current) return;
         flashShared('copied');
         return;
       } catch {
         void 0;
       }
     }
+    if (!mountedRef.current) return;
     setShareUrl(url);
   };
 

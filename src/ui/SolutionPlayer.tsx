@@ -30,6 +30,16 @@ export function SolutionPlayer({ cube, solution, phases, step, setStep }: Props)
 
   const [copied, setCopied] = useState<'ok' | 'fail' | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMounted = useRef(false);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!playing) return;
@@ -270,14 +280,21 @@ export function SolutionPlayer({ cube, solution, phases, step, setStep }: Props)
           type="button"
           className="btn btn--tiny"
           onClick={async () => {
+            let copyStatus: 'ok' | 'fail';
             try {
               if (!navigator.clipboard) throw new Error('clipboard unavailable');
               await navigator.clipboard.writeText(solutionText);
-              setCopied('ok');
+              copyStatus = 'ok';
             } catch {
-              setCopied('fail');
+              copyStatus = 'fail';
             }
-            setTimeout(() => setCopied(null), 1500);
+            if (!isMounted.current) return;
+            setCopied(copyStatus);
+            if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
+            copyFeedbackTimer.current = setTimeout(() => {
+              setCopied(null);
+              copyFeedbackTimer.current = null;
+            }, 1500);
           }}
           title="Copy the full solution"
           disabled={total === 0}
